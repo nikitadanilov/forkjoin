@@ -42,9 +42,6 @@
 ;;; Implementation is very simple: a separate thread is used for each forked
 ;;; function.
 
-;;(load "/Users/517711/quicklisp/setup.lisp")
-(ql:quickload :bordeaux-threads)
-
 (defpackage :fork-join
   (:nicknames :fj)
   (:use common-lisp bordeaux-threads)
