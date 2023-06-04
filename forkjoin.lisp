@@ -60,7 +60,7 @@
    ; Condition variable used to wait for thread termination.
    (wait  :initform (make-condition-variable))
    (forks :initform ())    ; List of forked functions.
-   ; If true, conditions signalled by the forked threads and propagated to the group.
+   ; If true, conditions signalled by the forked threads are propagated to the group.
    (prop  :initarg  :prop)
    ; List of propagated conditions, not yet re-signalled.
    (sigs  :initform ())
