@@ -72,9 +72,12 @@
 (defun fork-name (group function) ; Underlying thread name.
   (format nil "fork-~a-~a" group function))
 
+(defmacro with-group-lock ((group) &body body)
+  `(with-slots (lock) ,group (with-lock-held (lock) ,@body)))
+
 (defun done-fork (group fork sig)
-  (with-slots (lock wait forks prop sigs next done) group
-    (with-lock-held (lock)
+  (with-group-lock (group)
+    (with-slots (wait forks prop sigs next done) group
       (setf forks (remove fork forks :test #'eq))
       (if sig (if prop (push sig sigs) ; Propagate ...
 		  (signal sig)))       ; or re-signal immediately.
@@ -90,8 +93,8 @@
 	  (done-fork group fork sig)))))
 
 (defun make-fork (group function) ; Create and add a forked thread to the group
-  (with-slots (lock forks) group
-    (with-lock-held (lock)
+  (with-group-lock (group)
+    (with-slots (forks) group
       (let ((f (make-instance 'fork :group group)))
 	(setf (slot-value f 'thread)
 	      (make-thread (fork-function group f function)
@@ -106,8 +109,8 @@
     (and prop sigs (not (signal (pop sigs))) (handle group))))
   
 (defun wait (group) ; Wait until all forked threads terminate.
-  (with-slots (lock wait forks sigs) group
-    (with-lock-held (lock)
+  (with-group-lock (group)
+    (with-slots (lock wait forks sigs) group
       (loop while (or forks sigs) do
 	(progn
 	  (handle group)
