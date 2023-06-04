@@ -69,9 +69,6 @@
    ; Optional call-back invoked on the group termination.
    (done  :initform (constantly nil) :initarg :done)))
 
-(defun fork-name (group function) ; Underlying thread name.
-  (format nil "fork-~a-~a" group function))
-
 (defmacro with-group-lock ((group) &body body)
   `(with-slots (lock) ,group (with-lock-held (lock) ,@body)))
 
@@ -97,8 +94,7 @@
     (with-slots (forks) group
       (let ((f (make-instance 'fork :group group)))
 	(setf (slot-value f 'thread)
-	      (make-thread (fork-function group f function)
-			   :name (fork-name group function)))
+	      (make-thread (fork-function group f function)))
 	(push f forks)))))
 
 (defun make-group (prop &key next done)
