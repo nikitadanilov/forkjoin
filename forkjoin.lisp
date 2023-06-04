@@ -106,7 +106,7 @@
 
 (defun handle (group) ; Handle propagated conditions.
   (with-slots (prop sigs) group
-    (and prop sigs (not (signal (pop sigs))) (handle group))))
+    (and prop sigs (progn (signal (pop sigs)) (handle group)))))
   
 (defun wait (group) ; Wait until all forked threads terminate.
   (with-group-lock (group)
