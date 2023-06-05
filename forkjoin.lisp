@@ -6,7 +6,7 @@
 ;;;
 ;;; The simplest usage example is:
 ;;;
-;;; (FJ:FORK
+;;; (FORK
 ;;;   (FOO)
 ;;;   (BAR X)
 ;;;   (BAZ))
@@ -15,24 +15,27 @@
 ;;;
 ;;; Join can be separate:
 ;;; 
-;;; (LET ((GROUP (FJ:FORK-LAUNCH (T) ; T means 'propagate conditions to the waiter'.
+;;; (LET ((GROUP (FORK-LAUNCH (T) ; T means 'propagate conditions to the waiter'.
 ;;;                (FOO)
 ;;;                (BAR X)
 ;;;                (BAZ))))
 ;;;   (COMPUTE-SOMETHING)            ; Compute concurrently with the forked functions.
-;;;   (FJ:WAIT GROUP))               ; Wait for FOO, BAR and BAZ completion.
+;;;   (WAIT GROUP))               ; Wait for FOO, BAR and BAZ completion.
 ;;;
 ;;; Instead of synchronous join, call-backs can be specified for a group. NEXT
 ;;; call-back is called with 2 parameters (the group and the fork), when a
 ;;; forked thread completes in the group and DONE call-back is called with the
 ;;; group as the parameter when all forks complete:
 ;;;
-;;; (FJ:FORK-LAUNCH (T #'NEXT #'DONE)
+;;; (FORK-LAUNCH (T #'NEXT #'DONE)
 ;;;   (FOO)
 ;;;   (BAR X)
 ;;;   (BAZ))
 ;;;
-;;; Conditions, errors, signals.
+;;; (KILL GROUP) terminates all forked threads in GROUP. If a thread in GROUP is
+;;; waiting in (WAIT SUBGROUP), the SUBGROUP is terminated recursively. KILL
+;;; uses BORDEAUX-THREADS:INTERRUPT-THREAD (c.f.) so all the appropriate caveats
+;;; apply.
 ;;;
 ;;; If a fork-group is created with PROP flag set to true (default for FORK
 ;;; macro), any condition signalled by a forked function within the group is
@@ -45,7 +48,7 @@
 (defpackage :fork-join
   (:nicknames :fj)
   (:use common-lisp bordeaux-threads)
-  (:export make-group fork-launch wait fork kill))
+  (:export make-group fork-launch wait fork kill group next done prop))
 
 (in-package :fork-join)
 
@@ -65,9 +68,9 @@
    ; List of propagated conditions, not yet re-signalled.
    (sigs  :initform ())
    ; Optional call-back invoked on each forked thread termination.
-   (next  :initform (constantly nil) :initarg :next)
+   (next  :initform nil :initarg :next)
    ; Optional call-back invoked on the group termination.
-   (done  :initform (constantly nil) :initarg :done)))
+   (done  :initform nil :initarg :done)))
 
 (defmacro with-group-lock (group &body body)
   `(with-slots (lock) ,group (with-lock-held (lock) ,@body)))
@@ -78,8 +81,8 @@
       (setf forks (remove fork forks :test #'eq))
       (if sig (if prop (push sig sigs) ; Propagate ...
 		  (signal sig)))       ; or re-signal immediately.
-      (funcall next group fork)
-      (unless forks (funcall done group))
+      (when next (funcall next group fork))
+      (unless forks (when done (funcall done group)))
       (if (or sigs (not forks)) (condition-notify wait)))))
 
 (define-condition fork-exit (condition) ())
@@ -88,7 +91,7 @@
   #'(lambda ()
       (let (sig)
 	(unwind-protect (handler-case (funcall func)
-			  (fork-exit (e) nil) ; Ignore exit.
+			  (fork-exit (e) (declare (ignore e)) nil) ; Ignore exit.
 			  (condition (s) (setf sig s)))
 	  (done-fork group fork sig)))))
 
@@ -124,17 +127,31 @@
 	(with-group-lock group
 	  (with-slots (lock wait forks sigs) group
 	    (loop while (or forks sigs) do
-	      (progn
-		(handle group)
-		(condition-wait wait lock))))))
+	      (progn (handle group)
+		     (condition-wait wait lock))))))
     (fork-exit (e) (kill group) (signal e)))) ; Parent is killed, infanticide.
 
 ; Create and return a group of forked functions.
-(defmacro fork-launch ((prop &optional (next (constantly t)) (done (constantly t))) &body body) 
+(defmacro fork-launch ((prop &optional next done) &body body)
   (let ((g (gensym)))
     `(let ((,g (make-group ,prop :next ,next :done ,done)))
        ,@(loop for f in body collect `(make-fork ,g #'(lambda () ,f)))
        ,g)))
 
-(defmacro fork (&body body) ; Fork and wait.
-  `(wait (fork-launch (t) ,@body)))
+(defmacro fork-with (g &body body) ; Add forked functions to an existing group.
+  `(progn ,@(loop for f in body collect `(make-fork ,g #'(lambda () ,f)))))
+
+(defmacro fork (&body body) `(wait (fork-launch (t) ,@body))) ; Fork and wait.
+
+;;
+;; Additional functionality on top of basic fork-join.
+;;
+
+(defun timeout-trigger (group timeout)
+  (handler-case
+      (with-timeout (timeout) (loop (sleep timeout)))
+    (timeout (e) (declare (ignore e)) (kill group))))
+
+(defmacro fork-timeout (group timeout &body body)
+  `(fork-with ,group ,@body (timeout-trigger ,group ,timeout)))
+
