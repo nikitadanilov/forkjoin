@@ -19,7 +19,7 @@
 ;;;                (FOO)
 ;;;                (BAR X)
 ;;;                (BAZ))))
-;;;   (COMPUTE-SOMETHING)            ; Compute concurrently with the forked functions.
+;;;   (COMPUTE-SOMETHING)         ; Compute concurrently with the forked functions.
 ;;;   (WAIT GROUP))               ; Wait for FOO, BAR and BAZ completion.
 ;;;
 ;;; Instead of synchronous join, call-backs can be specified for a group. NEXT
@@ -32,10 +32,26 @@
 ;;;   (BAR X)
 ;;;   (BAZ))
 ;;;
+;;; Group creation can be separated from forking:
+;;;
+;;; (SETF G (MAKE-GROUP T)) ; Create new group with PROP flag true.
+;;; (SETF (SLOT-VALUE G 'NEXT) #'NEXT-CALLBACK) ; Setup the group.
+;;; (FORK-WITH G                                ; Launch functions.
+;;;   (FOO)
+;;;   (BAR X)
+;;;   (BAZ))
+;;;
 ;;; (KILL GROUP) terminates all forked threads in GROUP. If a thread in GROUP is
 ;;; waiting in (WAIT SUBGROUP), the SUBGROUP is terminated recursively. KILL
 ;;; uses BORDEAUX-THREADS:INTERRUPT-THREAD (c.f.) so all the appropriate caveats
 ;;; apply.
+;;;
+;;; Timeout:
+;;;
+;;; (FORK-TIMEOUT G 3600.0 ; Start FOO, BAR and BAZ in group G.
+;;;   (FOO)                ; After 1 hour (3600 seconds), terminate the group.
+;;;   (BAR X)                           
+;;;   (BAZ))
 ;;;
 ;;; If a fork-group is created with PROP flag set to true (default for FORK
 ;;; macro), any condition signalled by a forked function within the group is
@@ -48,7 +64,8 @@
 (defpackage :fork-join
   (:nicknames :fj)
   (:use common-lisp bordeaux-threads)
-  (:export make-group fork-launch wait fork kill group next done prop))
+  (:export make-group fork-launch fork-timeout wait fork kill
+	   fork-with group next done prop))
 
 (in-package :fork-join)
 
@@ -91,7 +108,7 @@
   #'(lambda ()
       (let (sig)
 	(unwind-protect (handler-case (funcall func)
-			  (fork-exit (e) (declare (ignore e)) nil) ; Ignore exit.
+			  (fork-exit () nil) ; Ignore exit.
 			  (condition (s) (setf sig s)))
 	  (done-fork group fork sig)))))
 
@@ -150,7 +167,7 @@
 (defun timeout-trigger (group timeout)
   (handler-case
       (with-timeout (timeout) (loop (sleep timeout)))
-    (timeout (e) (declare (ignore e)) (kill group))))
+    (timeout () (kill group))))
 
 (defmacro fork-timeout (group timeout &body body)
   `(fork-with ,group ,@body (timeout-trigger ,group ,timeout)))
