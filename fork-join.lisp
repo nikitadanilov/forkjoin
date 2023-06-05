@@ -130,7 +130,7 @@
 (defun kill (group)
   (with-group-lock group
     (with-slots (forks) group
-      (let ((self))
+      (let (self) ; Handle the case when current thread is part of the group.
 	(loop for fork in forks do
 	     (let ((thread (slot-value fork 'thread)))
 	       (if (eq thread (current-thread))
@@ -172,3 +172,5 @@
 (defmacro fork-timeout (group timeout &body body)
   `(fork-with ,group ,@body (timeout-trigger ,group ,timeout)))
 
+(defun forks (group)
+  (with-group-lock group (with-slots (forks) group (length forks))))
