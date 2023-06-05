@@ -45,7 +45,7 @@
 (defpackage :fork-join
   (:nicknames :fj)
   (:use common-lisp bordeaux-threads)
-  (:export make-group fork-launch wait fork))
+  (:export make-group fork-launch wait fork kill))
 
 (in-package :fork-join)
 
@@ -69,11 +69,11 @@
    ; Optional call-back invoked on the group termination.
    (done  :initform (constantly nil) :initarg :done)))
 
-(defmacro with-group-lock ((group) &body body)
+(defmacro with-group-lock (group &body body)
   `(with-slots (lock) ,group (with-lock-held (lock) ,@body)))
 
 (defun done-fork (group fork sig)
-  (with-group-lock (group)
+  (with-group-lock group
     (with-slots (wait forks prop sigs next done) group
       (setf forks (remove fork forks :test #'eq))
       (if sig (if prop (push sig sigs) ; Propagate ...
@@ -82,15 +82,18 @@
       (unless forks (funcall done group))
       (if (or sigs (not forks)) (condition-notify wait)))))
 
+(define-condition fork-exit (condition) ())
+
 (defun fork-function (group fork func) ; Startup function of a forked thread.
   #'(lambda ()
       (let (sig)
 	(unwind-protect (handler-case (funcall func)
+			  (fork-exit (e) nil) ; Ignore exit.
 			  (condition (s) (setf sig s)))
 	  (done-fork group fork sig)))))
 
 (defun make-fork (group function) ; Create and add a forked thread to the group
-  (with-group-lock (group)
+  (with-group-lock group
     (with-slots (forks) group
       (let ((f (make-instance 'fork :group group)))
 	(setf (slot-value f 'thread)
@@ -104,13 +107,27 @@
   (with-slots (prop sigs) group
     (and prop sigs (progn (signal (pop sigs)) (handle group)))))
   
+(defun kill (group)
+  (with-group-lock group
+    (with-slots (forks) group
+      (let ((self))
+	(loop for fork in forks do
+	     (let ((thread (slot-value fork 'thread)))
+	       (if (eq thread (current-thread))
+		   (setf self t)
+		   (interrupt-thread thread #'signal 'fork-exit))))
+	(if self (signal 'fork-exit))))))
+
 (defun wait (group) ; Wait until all forked threads terminate.
-  (with-group-lock (group)
-    (with-slots (lock wait forks sigs) group
-      (loop while (or forks sigs) do
-	(progn
-	  (handle group)
-	  (condition-wait wait lock))))))
+  (handler-case
+      (progn 
+	(with-group-lock group
+	  (with-slots (lock wait forks sigs) group
+	    (loop while (or forks sigs) do
+	      (progn
+		(handle group)
+		(condition-wait wait lock))))))
+    (fork-exit (e) (kill group) (signal e)))) ; Parent is killed, infanticide.
 
 ; Create and return a group of forked functions.
 (defmacro fork-launch ((prop &optional (next (constantly t)) (done (constantly t))) &body body) 
@@ -121,5 +138,3 @@
 
 (defmacro fork (&body body) ; Fork and wait.
   `(wait (fork-launch (t) ,@body)))
-
-
