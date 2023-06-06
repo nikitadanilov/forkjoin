@@ -60,8 +60,6 @@
 ;;;     (BAR X)
 ;;;     (BAZ)))
 ;;;
-;;; (CANCEL-TIMEOUT FORK) cancels all outstading timeouts.
-;;;
 ;;; If a fork is created with PROP flag set to true (default for FORK
 ;;; macro), any condition signalled by a forked function within the fork is
 ;;; propagated to the fork. Propagated conditions are picked by WAIT and
@@ -71,10 +69,19 @@
 ;;; function.
 
 (defpackage :fork-join
+  (:documentation "Fork-join concurrency")
   (:nicknames :fj)
-  (:use common-lisp bordeaux-threads)
-  (:export make-fork
-	   make-tine))
+  (:use #:common-lisp #:bordeaux-threads)
+  (:export #:tine
+           #:fork
+           #:make-fork
+           #:make-tine
+           #:add-tine
+           #:kill
+           #:wait
+           #:fork-with
+           #:fork-timeout
+           #:active-tines))
 
 (in-package :fork-join)
 
@@ -113,7 +120,7 @@
     (with-slots (wait tines prop sigs next done) fork
       (setf tines (remove tine tines :test #'eq))
       (if sig (if prop (push sig sigs) ; Propagate ...
-		  (signal sig)))       ; or re-signal immediately.
+                  (signal sig)))       ; or re-signal immediately.
       (when next (funcall next fork tine))
       (unless tines (when done (funcall done fork)))
       ;; XXX There is no BORDEAUX-THREADS:CONDITION-BROADCAST?
@@ -124,20 +131,17 @@
 (defun tine-function (fork tine) ; Startup function of a forked thread.
   #'(lambda ()
       (let (sig)
-	(unwind-protect (handler-case (funcall (slot-value tine 'func))
-			  (tine-exit () nil) ; Ignore exit.
-			  (condition (s) (setf sig s)))
-	  (done-tine fork tine sig)))))
-
-(defun add-tine-nolock (fork tine)
-  (with-slots (tines) fork
-    (push tine tines)
-    (setf (slot-value tine 'fork) fork
-	  (slot-value tine 'thread) (make-thread (tine-function fork tine)))))
+        (unwind-protect (handler-case (funcall (slot-value tine 'func))
+                          (tine-exit () nil) ; Ignore exit.
+                          (condition (s) (setf sig s)))
+          (done-tine fork tine sig)))))
 
 (defun add-tine (fork tine) ; Add a tine to the fork and start the thread.
   (with-fork-lock fork
-    (add-tine-nolock fork tine)))
+    (with-slots (tines) fork
+      (push tine tines)
+      (setf (slot-value tine 'fork) fork
+            (slot-value tine 'thread) (make-thread (tine-function fork tine))))))
 
 (defun handle (fork) ; Handle propagated conditions.
   (with-slots (prop sigs) fork
@@ -147,73 +151,40 @@
   (with-fork-lock fork
     (with-slots (tines) fork
       (let (self) ; Handle the case when current thread is part of the fork.
-	(loop for tine in tines do
-	     (let ((thread (slot-value tine 'thread)))
-	       (if (eq thread (current-thread))
-		   (setf self t)
-		   (interrupt-thread thread #'signal 'tine-exit))))
-	(if self (signal 'tine-exit))))))
+        (loop for tine in tines do
+             (let ((thread (slot-value tine 'thread)))
+               (if (eq thread (current-thread))
+                   (setf self t)
+                   (interrupt-thread thread #'signal 'tine-exit))))
+        (if self (signal 'tine-exit))))))
 
 (defun wait (fork) ; Wait until all forked threads terminate.
   (handler-case
       (progn
-	(with-fork-lock fork
-	  (with-slots (lock wait tines sigs) fork
-	    (loop while (or tines sigs) do
-	      (progn (handle fork)
-		     (condition-wait wait lock))))))
+        (with-fork-lock fork
+          (with-slots (lock wait tines sigs) fork
+            (loop while (or tines sigs) do
+              (progn (handle fork)
+                     (condition-wait wait lock))))))
     (tine-exit (e) (kill fork) (signal e)))) ; Parent is killed, infanticide.
 
 (defmacro fork-with (fork &body body) ; Add tines to an existing fork.
   `(progn ,@(loop for form in body collect
-	    `(add-tine ,fork (make-tine #'(lambda () ,form))))))
+            `(add-tine ,fork (make-tine #'(lambda () ,form))))))
 
 (defmacro fork (&body body) ; Fork and wait.
   (let* ((f (gensym)))
     `(let ((,f (make-fork t)))
        ,@(loop for form in body collect
-	    `(add-tine ,f (make-tine #'(lambda () ,form))))
+            `(add-tine ,f (make-tine #'(lambda () ,form))))
        (wait ,f))))
 
 ;;
 ;; Additional functionality on top of basic fork-join.
 ;;
 
-(define-condition timeout-cancel (condition) ())
-
-(defun timeout-trigger (fork timeout)
-  (handler-case
-      (with-timeout (timeout) (loop (sleep timeout)))
-    (timeout-cancel () t)
-    (timeout () (kill fork))))
-
-(defun timeout-p (tine)
-  (eq (slot-value tine 'func) #'timeout-trigger))
-
-(defun cancel-timeout-nolock (fork)
-  (with-slots (tines) fork
-    (mapcar
-     #'(lambda (tine)
-	 (if (timeout-p tine)
-	     (interrupt-thread (slot-value tine 'thread)
-			       #'signal 'timeout-cancel)))
-     tines)))
-
-(defun cancel-timeout (fork)
-  (with-fork-lock fork (cancel-timeout-nolock fork)))
-
 (defun fork-timeout (fork timeout)
-  (with-fork-lock fork
-    (with-slots (tines next) fork
-      (let ((oldnext next))
-	(setf next #'(lambda (f tt)
-		       ; This works, because DONE-TINE removes the tine from the
-		       ; TINES before calling NEXT.
-		       (if (every #'timeout-p (slot-value f 'tines))
-			   (cancel-timeout-nolock f))
-		       (if oldnext (funcall oldnext f tt)))))))
-  (add-tine fork
-	    (make-tine #'(lambda () (timeout-trigger fork timeout)))))
+  (make-thread #'(lambda () (sleep timeout) (kill fork))))
 
 (defun active-tines (fork)
   (with-fork-lock fork (with-slots (tines) fork (length tines))))
