@@ -1,8 +1,0 @@
-(asdf:defsystem "fork-join"
-  :description "Fork-join style concurrency."
-  :author "Your Name <danilov@gmail.com>"
-  :license "GPL2"
-  :version "0.0.1"
-  :serial t
-  :depends-on ("bordeaux-threads")
-  :components ((:file "fork-join")))
