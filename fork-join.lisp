@@ -4,58 +4,67 @@
 ;;; This package implements a simple fork-join concurrency on top of
 ;;; bordeaux-threads.
 ;;;
-;;; The simplest usage example is:
+;;; The simplest usage is:
 ;;;
 ;;; (FORK
 ;;;   (FOO)
 ;;;   (BAR X)
 ;;;   (BAZ))
 ;;;
-;;; This computes FOO, BAR and BAZ in 3 separate threads and waits until all of them complete.
+;;; This computes FOO, BAR and BAZ in 3 separate threads and waits until all of
+;;; them complete.
 ;;;
-;;; Join can be separate:
-;;; 
-;;; (LET ((GROUP (FORK-LAUNCH (T) ; T means 'propagate conditions to the waiter'.
-;;;                (FOO)
-;;;                (BAR X)
-;;;                (BAZ))))
-;;;   (COMPUTE-SOMETHING)         ; Compute concurrently with the forked functions.
-;;;   (WAIT GROUP))               ; Wait for FOO, BAR and BAZ completion.
+;;; A group of concurrent computations that can be manipulated as a whole is
+;;; called "a fork". A particular computation in the fork is called "a tine".
 ;;;
-;;; Instead of synchronous join, call-backs can be specified for a group. NEXT
-;;; call-back is called with 2 parameters (the group and the fork), when a
-;;; forked thread completes in the group and DONE call-back is called with the
-;;; group as the parameter when all forks complete:
+;;; (tine, noun: a prong or sharp point, such as that on a fork or antler.)
 ;;;
-;;; (FORK-LAUNCH (T #'NEXT #'DONE)
+;;; For a fuller control than in the example above, create a fork explicitly,
+;;; then add tines to it. When a tine is added to a fork, the tine function
+;;; starts concurrent execution immediately:
+;;;
+;;; (LET ((FORK (MAKE-FORK T))) ; T means 'propagate conditions to the waiter'.
+;;;   (FORK-WITH FORK
+;;;     (FOO)
+;;;     (BAR X)
+;;;     (BAZ))))
+;;;   (COMPUTE-SOMETHING)       ; Compute concurrently with the forked functions.
+;;;   (WAIT GROUP))             ; Wait for FOO, BAR and BAZ completion.
+;;;
+;;; Tines can be created and added explicitly (again, this immediately starts
+;;; tine computation in a concurrent thread):
+;;;
+;;; (ADD-TINE FORK (MAKE-TINE #'FUNCTION))
+;;;
+;;; Instead of a synchronous join, call-backs can be specified for a fork. NEXT
+;;; call-back is called with 2 parameters (the fork and the tine), when a forked
+;;; thread completes in the fork and DONE call-back is called with the fork as
+;;; the parameter when all tines complete:
+;;;
+;;; (FORK-WITH (MAKE-FORK T :NEXT #'NEXT :DONE #'DONE)
 ;;;   (FOO)
 ;;;   (BAR X)
-;;;   (BAZ))
+;;;   (BAZ)))))
 ;;;
-;;; Group creation can be separated from forking:
-;;;
-;;; (SETF G (MAKE-GROUP T)) ; Create new group with PROP flag true.
-;;; (SETF (SLOT-VALUE G 'NEXT) #'NEXT-CALLBACK) ; Setup the group.
-;;; (FORK-WITH G                                ; Launch functions.
-;;;   (FOO)
-;;;   (BAR X)
-;;;   (BAZ))
-;;;
-;;; (KILL GROUP) terminates all forked threads in GROUP. If a thread in GROUP is
-;;; waiting in (WAIT SUBGROUP), the SUBGROUP is terminated recursively. KILL
+;;; (KILL FORK) terminates all forked threads in FORK. If a thread in FORK is
+;;; waiting in (WAIT SUBFORK), the SUBFORK is terminated recursively. KILL
 ;;; uses BORDEAUX-THREADS:INTERRUPT-THREAD (c.f.) so all the appropriate caveats
 ;;; apply.
 ;;;
 ;;; Timeout:
 ;;;
-;;; (FORK-TIMEOUT G 3600.0 ; Start FOO, BAR and BAZ in group G.
-;;;   (FOO)                ; After 1 hour (3600 seconds), terminate the group.
-;;;   (BAR X)                           
-;;;   (BAZ))
+;;; (LET ((FORK (MAKE-FORK T)))
+;;;   (FORK-TIMEOUT FORK 3600.0) ; After 1 hour, terminate the fork.
+;;;   (FORK-WITH FORK            ; Start FOO, BAR and BAZ in FORK.
+;;;     (FOO)
+;;;     (BAR X)
+;;;     (BAZ)))
 ;;;
-;;; If a fork-group is created with PROP flag set to true (default for FORK
-;;; macro), any condition signalled by a forked function within the group is
-;;; propagated to the group. Propagated conditions are picked by WAIT and
+;;; (CANCEL-TIMEOUT FORK) cancels all outstading timeouts.
+;;;
+;;; If a fork is created with PROP flag set to true (default for FORK
+;;; macro), any condition signalled by a forked function within the fork is
+;;; propagated to the fork. Propagated conditions are picked by WAIT and
 ;;; re-signalled in the waiting thread.
 ;;;
 ;;; Implementation is very simple: a separate thread is used for each forked
@@ -64,113 +73,147 @@
 (defpackage :fork-join
   (:nicknames :fj)
   (:use common-lisp bordeaux-threads)
-  (:export make-group fork-launch fork-timeout wait fork kill
-	   fork-with group next done prop))
+  (:export make-fork
+	   make-tine))
 
 (in-package :fork-join)
 
-(defclass fork ()             ; Class of forked functions.
-  ((group  :initarg :group)   ; Fork-group to which this function belongs.
+(defclass tine ()             ; A function computed as part of a fork.
+  ((fork   :initarg :fork)    ; Fork to which this function belongs.
+   (func   :initarg :func)    ; The function executed in this tine.
    (thread :initform nil)))   ; Underlying thread.
 
-(defclass group ()
+(defclass fork () ; A group of tines.
    ; This lock protects all fields and serialises forked thread creation and
    ; termination.
   ((lock  :initform (make-lock))
    ; Condition variable used to wait for thread termination.
    (wait  :initform (make-condition-variable))
-   (forks :initform ())    ; List of forked functions.
-   ; If true, conditions signalled by the forked threads are propagated to the group.
-   (prop  :initarg  :prop)
+   (tines :initform ()) ; List of forked functions.
+   ; If true, conditions signalled by the tines are propagated to the fork.
+   (prop  :initarg :prop)
    ; List of propagated conditions, not yet re-signalled.
    (sigs  :initform ())
-   ; Optional call-back invoked on each forked thread termination.
+   ; Optional call-back invoked on each tine termination.
    (next  :initform nil :initarg :next)
-   ; Optional call-back invoked on the group termination.
+   ; Optional call-back invoked on the fork termination.
    (done  :initform nil :initarg :done)))
 
-(defmacro with-group-lock (group &body body)
-  `(with-slots (lock) ,group (with-lock-held (lock) ,@body)))
+(defun make-fork (prop &key next done)
+  (make-instance 'fork :prop prop :next next :done done))
 
-(defun done-fork (group fork sig)
-  (with-group-lock group
-    (with-slots (wait forks prop sigs next done) group
-      (setf forks (remove fork forks :test #'eq))
+(defun make-tine (func)
+  (make-instance 'tine :func func))
+
+(defmacro with-fork-lock (fork &body body)
+  `(with-slots (lock) ,fork (with-lock-held (lock) ,@body)))
+
+(defun done-tine (fork tine sig)
+  (with-fork-lock fork
+    (with-slots (wait tines prop sigs next done) fork
+      (setf tines (remove tine tines :test #'eq))
       (if sig (if prop (push sig sigs) ; Propagate ...
 		  (signal sig)))       ; or re-signal immediately.
-      (when next (funcall next group fork))
-      (unless forks (when done (funcall done group)))
-      (if (or sigs (not forks)) (condition-notify wait)))))
+      (when next (funcall next fork tine))
+      (unless tines (when done (funcall done fork)))
+      ;; XXX There is no BORDEAUX-THREADS:CONDITION-BROADCAST?
+      (if (or sigs (not tines)) (condition-notify wait)))))
 
-(define-condition fork-exit (condition) ())
+(define-condition tine-exit (condition) ())
 
-(defun fork-function (group fork func) ; Startup function of a forked thread.
+(defun tine-function (fork tine) ; Startup function of a forked thread.
   #'(lambda ()
       (let (sig)
-	(unwind-protect (handler-case (funcall func)
-			  (fork-exit () nil) ; Ignore exit.
+	(unwind-protect (handler-case (funcall (slot-value tine 'func))
+			  (tine-exit () nil) ; Ignore exit.
 			  (condition (s) (setf sig s)))
-	  (done-fork group fork sig)))))
+	  (done-tine fork tine sig)))))
 
-(defun make-fork (group function) ; Create and add a forked thread to the group
-  (with-group-lock group
-    (with-slots (forks) group
-      (let ((f (make-instance 'fork :group group)))
-	(setf (slot-value f 'thread)
-	      (make-thread (fork-function group f function)))
-	(push f forks)))))
+(defun add-tine-nolock (fork tine)
+  (with-slots (tines) fork
+    (push tine tines)
+    (setf (slot-value tine 'fork) fork
+	  (slot-value tine 'thread) (make-thread (tine-function fork tine)))))
 
-(defun make-group (prop &key next done)
-  (make-instance 'group :prop prop :next next :done done))
+(defun add-tine (fork tine) ; Add a tine to the fork and start the thread.
+  (with-fork-lock fork
+    (add-tine-nolock fork tine)))
 
-(defun handle (group) ; Handle propagated conditions.
-  (with-slots (prop sigs) group
-    (and prop sigs (progn (signal (pop sigs)) (handle group)))))
-  
-(defun kill (group)
-  (with-group-lock group
-    (with-slots (forks) group
-      (let (self) ; Handle the case when current thread is part of the group.
-	(loop for fork in forks do
-	     (let ((thread (slot-value fork 'thread)))
+(defun handle (fork) ; Handle propagated conditions.
+  (with-slots (prop sigs) fork
+    (and prop sigs (progn (signal (pop sigs)) (handle fork)))))
+
+(defun kill (fork)
+  (with-fork-lock fork
+    (with-slots (tines) fork
+      (let (self) ; Handle the case when current thread is part of the fork.
+	(loop for tine in tines do
+	     (let ((thread (slot-value tine 'thread)))
 	       (if (eq thread (current-thread))
 		   (setf self t)
-		   (interrupt-thread thread #'signal 'fork-exit))))
-	(if self (signal 'fork-exit))))))
+		   (interrupt-thread thread #'signal 'tine-exit))))
+	(if self (signal 'tine-exit))))))
 
-(defun wait (group) ; Wait until all forked threads terminate.
+(defun wait (fork) ; Wait until all forked threads terminate.
   (handler-case
-      (progn 
-	(with-group-lock group
-	  (with-slots (lock wait forks sigs) group
-	    (loop while (or forks sigs) do
-	      (progn (handle group)
+      (progn
+	(with-fork-lock fork
+	  (with-slots (lock wait tines sigs) fork
+	    (loop while (or tines sigs) do
+	      (progn (handle fork)
 		     (condition-wait wait lock))))))
-    (fork-exit (e) (kill group) (signal e)))) ; Parent is killed, infanticide.
+    (tine-exit (e) (kill fork) (signal e)))) ; Parent is killed, infanticide.
 
-; Create and return a group of forked functions.
-(defmacro fork-launch ((prop &optional next done) &body body)
-  (let ((g (gensym)))
-    `(let ((,g (make-group ,prop :next ,next :done ,done)))
-       ,@(loop for f in body collect `(make-fork ,g #'(lambda () ,f)))
-       ,g)))
+(defmacro fork-with (fork &body body) ; Add tines to an existing fork.
+  `(progn ,@(loop for form in body collect
+	    `(add-tine ,fork (make-tine #'(lambda () ,form))))))
 
-(defmacro fork-with (g &body body) ; Add forked functions to an existing group.
-  `(progn ,@(loop for f in body collect `(make-fork ,g #'(lambda () ,f)))))
-
-(defmacro fork (&body body) `(wait (fork-launch (t) ,@body))) ; Fork and wait.
+(defmacro fork (&body body) ; Fork and wait.
+  (let* ((f (gensym)))
+    `(let ((,f (make-fork t)))
+       ,@(loop for form in body collect
+	    `(add-tine ,f (make-tine #'(lambda () ,form))))
+       (wait ,f))))
 
 ;;
 ;; Additional functionality on top of basic fork-join.
 ;;
 
-(defun timeout-trigger (group timeout)
+(define-condition timeout-cancel (condition) ())
+
+(defun timeout-trigger (fork timeout)
   (handler-case
       (with-timeout (timeout) (loop (sleep timeout)))
-    (timeout () (kill group))))
+    (timeout-cancel () t)
+    (timeout () (kill fork))))
 
-(defmacro fork-timeout (group timeout &body body)
-  `(fork-with ,group ,@body (timeout-trigger ,group ,timeout)))
+(defun timeout-p (tine)
+  (eq (slot-value tine 'func) #'timeout-trigger))
 
-(defun forks (group)
-  (with-group-lock group (with-slots (forks) group (length forks))))
+(defun cancel-timeout-nolock (fork)
+  (with-slots (tines) fork
+    (mapcar
+     #'(lambda (tine)
+	 (if (timeout-p tine)
+	     (interrupt-thread (slot-value tine 'thread)
+			       #'signal 'timeout-cancel)))
+     tines)))
+
+(defun cancel-timeout (fork)
+  (with-fork-lock fork (cancel-timeout-nolock fork)))
+
+(defun fork-timeout (fork timeout)
+  (with-fork-lock fork
+    (with-slots (tines next) fork
+      (let ((oldnext next))
+	(setf next #'(lambda (f tt)
+		       ; This works, because DONE-TINE removes the tine from the
+		       ; TINES before calling NEXT.
+		       (if (every #'timeout-p (slot-value f 'tines))
+			   (cancel-timeout-nolock f))
+		       (if oldnext (funcall oldnext f tt)))))))
+  (add-tine fork
+	    (make-tine #'(lambda () (timeout-trigger fork timeout)))))
+
+(defun active-tines (fork)
+  (with-fork-lock fork (with-slots (tines) fork (length tines))))
