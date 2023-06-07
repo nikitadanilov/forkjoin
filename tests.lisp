@@ -28,6 +28,12 @@
 		 (sleep 1))
 	       t)))
 
+(define-test fork/let
+  :parent fork/base
+  (is equal '(1 2 nil)
+      (fork-let ((x 1) (y 2) z)
+	(list x y z))))
+
 (define-test fork/order
   :parent fork/base
   (is equal (let (out) (fork

@@ -81,6 +81,7 @@
            #:kill
            #:wait
            #:fork-with
+           #:fork-let
            #:fork-timeout
            #:active-tines))
 
@@ -177,7 +178,7 @@
   (let* ((f (gensym)))
     `(let ((,f (make-fork t)))
        ,@(loop for form in body collect
-            `(add-tine ,f (make-tine #'(lambda () ,form))))
+               `(add-tine ,f (make-tine #'(lambda () ,form))))
        (wait ,f))))
 
 ;;
@@ -189,3 +190,10 @@
 
 (defun active-tines (fork)
   (with-fork-lock fork (with-slots (tines) fork (length tines))))
+
+(defmacro fork-let (bindings &body body)
+  `(let (,@(loop for b in bindings collect (if (atom b) b (car b))))
+     (fork
+       ,@(loop for b in bindings when (consp b) collect
+               `(setf ,(car b) ,@(cdr b))))
+     ,@body))
