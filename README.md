@@ -13,3 +13,13 @@ It allows one to aggregate concurrent computations ('tines') into groups
 
 ```
 that runs `(FOO)`, `(BAR X)` and `(BAZ)` concurrently and waits until all of them complete.
+
+You can also bind variables concurrently:
+```
+ (FORK-LET
+   ((X (FOO))
+    (Y (BAR X))
+    L ; Bound to nil.
+    (Z (BAZ ... L ...)))
+   (PROCESS X Y Z))
+```
