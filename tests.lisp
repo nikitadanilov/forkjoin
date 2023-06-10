@@ -161,5 +161,17 @@
 	  (fork-with fork
 	    (loop (sleep 1)))
 	  t)))
-  
+
+(define-test fork/container
+  :parent all)
+
+(define-test fork/map
+  :parent fork/container
+  (is equalp #(1.1 3.2 5.3 7.4)
+      (progn (let* ((fork (make-fork t))
+		    (out (fork-map fork '(1.1 2.2 3.3 4.4)
+				   #'(lambda (idx val) (+ idx val)))))
+	       (wait fork)
+	       out))))
+
 (test 'all)

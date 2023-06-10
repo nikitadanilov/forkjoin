@@ -83,6 +83,7 @@
            #:fork-with
            #:fork-let
            #:fork-timeout
+           #:fork-map
            #:active-tines))
 
 (in-package :fork-join)
@@ -197,3 +198,12 @@
        ,@(loop for b in bindings when (consp b) collect
                `(setf ,(car b) ,@(cdr b))))
      ,@body))
+
+(defun fork-map (fork seq fun)
+  (let ((out (make-array (length seq))))
+    (loop for idx from 0 below (length seq) do
+      (let ((i idx))
+        (add-tine fork (make-tine #'(lambda () (setf (elt out i)
+                                                     (funcall fun i
+                                                              (elt seq i))))))))
+    out))
