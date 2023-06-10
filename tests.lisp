@@ -50,11 +50,11 @@
   :parent fork/base
   :depends-on (fork/order)
   (is equal (sort (let (out
-                        (guard (bordeaux-threads:make-lock)))
+                        (guard (bt:make-lock)))
                     (fork
-                      (bordeaux-threads:with-lock-held (guard) (push 1 out))
-                      (bordeaux-threads:with-lock-held (guard) (push 2 out))
-                      (bordeaux-threads:with-lock-held (guard) (push 3 out)))
+                      (bt:with-lock-held (guard) (push 1 out))
+                      (bt:with-lock-held (guard) (push 2 out))
+                      (bt:with-lock-held (guard) (push 3 out)))
                     out)
                   #'<)
       '(1 2 3)))
@@ -63,7 +63,7 @@
   :parent fork/base
   :depends-on (fork/mutex)
   (is equal (sort (let (out
-                        (guard (bordeaux-threads:make-lock))
+                        (guard (bt:make-lock))
                         (fork (make-fork t)))
                     (loop for i in '(1 2 3 4 5 6 7 8 9) do
                       (let ((i i))
@@ -72,7 +72,7 @@
                                       #'(lambda ()
                                           (progn
                                             (sleep (random 2.0))
-                                            (bordeaux-threads:with-lock-held (guard)
+                                            (bt:with-lock-held (guard)
                                               (push i out))))))))
                     (wait fork)
                     out)
@@ -82,11 +82,11 @@
 (define-test fork/next-done
   :parent fork/base
   :depends-on (fork/tine)
-  (is = (let* ((guard (bordeaux-threads:make-lock))
+  (is = (let* ((guard (bt:make-lock))
                (c 0)
                (cb #'(lambda (&rest args)
                        (declare (ignore args))
-                       (bordeaux-threads:with-lock-held (guard) (incf c))))
+                       (bt:with-lock-held (guard) (incf c))))
                (fork (make-fork t :next cb :done cb)))
           (fork-with fork 1 2 3 4)
           (wait fork)
