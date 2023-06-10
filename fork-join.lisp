@@ -61,6 +61,21 @@
 ;;;     (BAR X)
 ;;;     (BAZ)))
 ;;;
+;;; FORK-MAP is a parallel version of MAP:
+;;;
+;;; (FORK-MAP FORK SEQ FUNC) concurrently calls FUNC with 2 parameters: index in
+;;; SEQ and the element at this index. Results of all forked functions are
+;;; collected in a vector, which is returned.
+;;;
+;;; Special variable *FACTORY* controls thread creation:
+;;;
+;;; (LET ((*FACTORY* (MAKE-FACTORY N)))
+;;;   BODY)
+;;;
+;;; In the dynamic extent of BODY, at most N threads will be forked at one time
+;;; (this is clearly deadlock-prone with nested forks, be careful). In N is NIL,
+;;; no limit is placed on the number of threads.
+;;;
 ;;; If a fork is created with PROP flag set to true (default for FORK
 ;;; macro), any condition signalled by a forked function within the fork is
 ;;; propagated to the fork. Propagated conditions are picked by WAIT and
@@ -84,7 +99,9 @@
            #:fork-let
            #:fork-timeout
            #:fork-map
-           #:active-tines))
+           #:active-tines
+           #:*factory*
+           #:make-factory))
 
 (in-package :fork-join)
 
@@ -109,15 +126,33 @@
    ; Optional call-back invoked on the fork termination.
    (done  :initform nil :initarg :done)))
 
+(defclass factory () ; An object controlling thread creation.
+  ((sem :initform nil)))
+
 (defun make-fork (prop &key next done)
   (make-instance 'fork :prop prop :next next :done done))
 
 (defun make-tine (func)
   (make-instance 'tine :func func))
 
+(defun make-factory (max)
+  (let ((factory (make-instance 'factory)))
+    (if max (setf (slot-value factory 'sem) (make-semaphore :count max)))
+    factory))
+
+(defvar *factory* (make-factory nil))
+
 (defmacro with-fork-lock (fork &body body)
   `(with-slots (lock) ,fork (with-lock-held (lock) ,@body)))
 
+(defun get-thread-slot ()
+  (with-slots (sem) *factory*
+    (when sem (wait-on-semaphore sem))))
+                   
+(defun put-thread-slot ()
+  (with-slots (sem) *factory*
+    (when sem (signal-semaphore sem))))
+                   
 (defun done-tine (fork tine sig)
   (with-fork-lock fork
     (with-slots (wait tines prop sigs next done) fork
@@ -127,24 +162,26 @@
       (when next (funcall next fork tine))
       (unless tines (when done (funcall done fork)))
       ;; XXX There is no BORDEAUX-THREADS:CONDITION-BROADCAST?
-      (if (or sigs (not tines)) (condition-notify wait)))))
+      (if (or sigs (not tines)) (condition-notify wait))))
+  (put-thread-slot))
 
 (define-condition tine-exit (condition) ())
 
-(defun tine-function (fork tine) ; Startup function of a forked thread.
+(defun tine-function (fork tine factory) ; Startup function of a forked thread.
   #'(lambda ()
-      (let (sig)
+      (let ((*factory* factory)sig)
         (unwind-protect (handler-case (funcall (slot-value tine 'func))
                           (tine-exit () nil) ; Ignore exit.
                           (condition (s) (setf sig s)))
           (done-tine fork tine sig)))))
 
 (defun add-tine (fork tine) ; Add a tine to the fork and start the thread.
+  (get-thread-slot)
   (with-fork-lock fork
     (with-slots (tines) fork
       (push tine tines)
       (setf (slot-value tine 'fork) fork
-            (slot-value tine 'thread) (make-thread (tine-function fork tine))))))
+            (slot-value tine 'thread) (make-thread (tine-function fork tine *factory*))))))
 
 (defun handle (fork) ; Handle propagated conditions.
   (with-slots (prop sigs) fork

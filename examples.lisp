@@ -65,15 +65,16 @@
 	  (dev (sqrt (average (mapcar #'(lambda (x) (expt (- x avg) 2)) l)))))
      (list avg min max dev)))
 
-(defun sort-time (fseq fpar limit r)
-  (let ((h '("avg" "min" "max" "dev")))
-    (format t "~10a: ~{~10<~a~>~} ~{~10<~a~>~}~%"
-	    "length" '("seq" "" "" "") '("par" "" "" ""))
-    (format t "~10<~a~>  ~{~10<~a~>~} ~{~10<~a~>~}~%" "" h h))
-  (loop for i from 0 below limit do
-    (let* ((n (expt 2 i))
-	   (list (loop repeat n collect (random n)))
-	   (seq (eval-rep r (funcall fseq list #'<)))
-	   (par (eval-rep r (funcall fpar list #'<))))
-      (format t "~10a: ~{~10,3f~} ~{~10,3f~}~%" n seq par))))
+(defun sort-time (fseq fpar limit r thread-max)
+  (let ((fj:*factory* (fj:make-factory thread-max)))
+    (let ((h '("avg" "min" "max" "dev")))
+      (format t "~10a: ~{~10<~a~>~} ~{~10<~a~>~}~%"
+	      "length" '("seq" "" "" "") '("par" "" "" ""))
+      (format t "~10<~a~>  ~{~10<~a~>~} ~{~10<~a~>~}~%" "" h h))
+    (loop for i from 0 below limit do
+      (let* ((n (expt 2 i))
+	     (list (loop repeat n collect (random n)))
+	     (seq (eval-rep r (funcall fseq list #'<)))
+	     (par (eval-rep r (funcall fpar list #'<))))
+	(format t "~10a: ~{~10,3f~} ~{~10,3f~}~%" n seq par)))))
 
